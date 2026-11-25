@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import { MarkdownRenderer } from "@/components/MarkdownRenderer";
 
 interface UsageSummary {
   promptTokenCount: number;
@@ -14,14 +15,27 @@ export default function Home() {
   const [usage, setUsage] = useState<UsageSummary | null>(null);
   const [elapsedMs, setElapsedMs] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  async function handleCopyAnswer() {
+    if (!answer) return;
+    try {
+      await navigator.clipboard.writeText(answer);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } catch {
+      // クリップボード権限がない環境では無視
+    }
+  }
 
   async function askGemini() {
     if (!prompt.trim() || isLoading) return;
 
     setIsLoading(true);
-    setAnswer("読み込み中...");
+    setAnswer("");
     setUsage(null);
     setElapsedMs(null);
+    setCopied(false);
 
     try {
       const res = await fetch("/api/gemini", {
@@ -74,9 +88,28 @@ export default function Home() {
         </button>
       </div>
 
-      <div className="mt-4 min-h-32 rounded-lg bg-gray-100 p-4 text-black whitespace-pre-wrap break-words">
-        {answer}
-      </div>
+      {(isLoading || answer) && (
+        <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-4 text-black">
+          <div className="mb-2 flex items-center justify-between border-b border-slate-200 pb-1.5">
+            <span className="text-xs font-semibold text-slate-500">Gemini</span>
+            {answer && !isLoading && (
+              <button
+                type="button"
+                onClick={handleCopyAnswer}
+                className="rounded border border-slate-300 bg-white px-2.5 py-0.5 text-xs text-slate-700 hover:bg-slate-100"
+              >
+                {copied ? "コピー済み" : "回答をコピー"}
+              </button>
+            )}
+          </div>
+
+          {isLoading ? (
+            <p className="text-sm text-slate-500 animate-pulse">読み込み中...</p>
+          ) : (
+            <MarkdownRenderer content={answer} />
+          )}
+        </div>
+      )}
 
       {(usage || elapsedMs !== null) && (
         <div className="mt-3 flex flex-wrap gap-2 text-xs text-gray-700">
