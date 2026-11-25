@@ -19,9 +19,21 @@ export async function POST(request: Request) {
 
         // モデル一覧
         // https://aistudio.google.com/docs/models
+        const startedAt = Date.now();
         const response = await ai.models.generateContent({
             model: 'gemini-3.6-flash',
             contents: prompt,
+        });
+
+        return NextResponse.json({
+            answer: response.text,
+            usage: {
+                promptTokenCount: response.usageMetadata?.promptTokenCount ?? 0,
+                candidatesTokenCount: response.usageMetadata?.candidatesTokenCount ?? 0,
+                thoughtsTokenCount: response.usageMetadata?.thoughtsTokenCount ?? 0,
+                totalTokenCount: response.usageMetadata?.totalTokenCount ?? 0,
+            },
+            elapsedMs: Date.now() - startedAt,
         });
 
         return NextResponse.json({
