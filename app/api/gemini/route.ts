@@ -4,12 +4,17 @@ import {
   buildGeminiContents,
   extractGeminiErrorMessage,
   GEMINI_MODEL,
+  type UsageSummary,
 } from "@/lib/gemini-config";
 
 interface RequestPayload {
   prompt?: string;
   messages?: Array<{ role: "user" | "model"; text: string; isError?: boolean }>;
   systemInstruction?: string;
+}
+
+function encodeNdjsonLine(payload: unknown): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify(payload) + "\n");
 }
 
 export async function POST(request: Request) {
@@ -41,24 +46,74 @@ export async function POST(request: Request) {
     const systemInstruction = body.systemInstruction?.trim() || undefined;
     const startedAt = Date.now();
 
-    const response = await ai.models.generateContent({
+    const responseStream = await ai.models.generateContentStream({
       model: GEMINI_MODEL,
       contents,
       config: {
+        abortSignal: request.signal,
         ...(systemInstruction ? { systemInstruction } : {}),
       },
     });
 
-    return NextResponse.json({
-      answer: response.text,
-      usage: {
-        promptTokenCount: response.usageMetadata?.promptTokenCount ?? 0,
-        candidatesTokenCount:
-          response.usageMetadata?.candidatesTokenCount ?? 0,
-        thoughtsTokenCount: response.usageMetadata?.thoughtsTokenCount ?? 0,
-        totalTokenCount: response.usageMetadata?.totalTokenCount ?? 0,
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        let latestUsage: UsageSummary = {
+          promptTokenCount: 0,
+          candidatesTokenCount: 0,
+          thoughtsTokenCount: 0,
+          totalTokenCount: 0,
+        };
+
+        try {
+          for await (const chunk of responseStream) {
+            if (request.signal.aborted) break;
+
+            if (chunk.usageMetadata) {
+              latestUsage = {
+                promptTokenCount: chunk.usageMetadata.promptTokenCount ?? 0,
+                candidatesTokenCount:
+                  chunk.usageMetadata.candidatesTokenCount ?? 0,
+                thoughtsTokenCount: chunk.usageMetadata.thoughtsTokenCount ?? 0,
+                totalTokenCount: chunk.usageMetadata.totalTokenCount ?? 0,
+              };
+            }
+
+            if (chunk.text) {
+              controller.enqueue(
+                encodeNdjsonLine({ type: "delta", text: chunk.text })
+              );
+            }
+          }
+
+          controller.enqueue(
+            encodeNdjsonLine({
+              type: "done",
+              usage: latestUsage,
+              elapsedMs: Date.now() - startedAt,
+            })
+          );
+          controller.close();
+        } catch (error) {
+          if (request.signal.aborted) {
+            controller.close();
+            return;
+          }
+          controller.enqueue(
+            encodeNdjsonLine({
+              type: "error",
+              error: extractGeminiErrorMessage(error),
+            })
+          );
+          controller.close();
+        }
       },
-      elapsedMs: Date.now() - startedAt,
+    });
+
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "application/x-ndjson; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+      },
     });
   } catch (error) {
     return NextResponse.json(
