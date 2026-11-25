@@ -14,6 +14,11 @@ import {
   type OutputLength,
   type UsageSummary,
 } from "@/lib/gemini-config";
+import {
+  getSpeechRecognitionConstructor,
+  stripMarkdownForSpeech,
+  type BrowserSpeechRecognition,
+} from "@/lib/speech";
 
 const SAMPLE_QUESTIONS = [
   "LLMのTransformerの仕組みを初心者にもわかりやすく教えて。",
@@ -61,7 +66,13 @@ export default function Home() {
   } | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
+  const [isListening, setIsListening] = useState(false);
+  const [interimTranscript, setInterimTranscript] = useState("");
+  const [speechError, setSpeechError] = useState<string | null>(null);
+  const [speakingId, setSpeakingId] = useState<string | null>(null);
+
   const abortControllerRef = useRef<AbortController | null>(null);
+  const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -116,6 +127,15 @@ export default function Home() {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isLoading]);
 
+  useEffect(() => {
+    return () => {
+      recognitionRef.current?.abort();
+      if (typeof window !== "undefined" && "speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+      }
+    };
+  }, []);
+
   function handleSelectPreset(presetId: string) {
     const found = SYSTEM_PRESETS.find((item) => item.id === presetId);
     if (!found) return;
@@ -136,6 +156,105 @@ export default function Home() {
     } catch {
       // クリップボード権限がない環境では無視
     }
+  }
+
+  function stopVoiceInput() {
+    recognitionRef.current?.stop();
+    recognitionRef.current = null;
+    setIsListening(false);
+    setInterimTranscript("");
+  }
+
+  function handleToggleVoiceInput() {
+    setSpeechError(null);
+
+    if (isListening) {
+      stopVoiceInput();
+      return;
+    }
+
+    const Recognition = getSpeechRecognitionConstructor();
+    if (!Recognition) {
+      setSpeechError(
+        "このブラウザは音声入力に対応していません（Chrome / Edge をご利用ください）"
+      );
+      return;
+    }
+
+    const recognition = new Recognition();
+    recognition.lang = "ja-JP";
+    recognition.interimResults = true;
+    recognition.continuous = true;
+
+    recognition.onresult = (event) => {
+      let finalized = "";
+      let interim = "";
+
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const transcript = event.results[i][0].transcript;
+        if (event.results[i].isFinal) {
+          finalized += transcript;
+        } else {
+          interim += transcript;
+        }
+      }
+
+      if (finalized) {
+        setPrompt((prev) =>
+          prev && !prev.endsWith("\n") && !prev.endsWith(" ")
+            ? `${prev} ${finalized}`
+            : `${prev}${finalized}`
+        );
+      }
+      setInterimTranscript(interim);
+    };
+
+    recognition.onerror = (event) => {
+      if (event.error === "not-allowed") {
+        setSpeechError("マイクの使用が許可されていません");
+      } else if (event.error !== "aborted") {
+        setSpeechError(`音声認識エラー: ${event.error}`);
+      }
+      setIsListening(false);
+      setInterimTranscript("");
+      recognitionRef.current = null;
+    };
+
+    recognition.onend = () => {
+      setIsListening(false);
+      setInterimTranscript("");
+      recognitionRef.current = null;
+    };
+
+    recognitionRef.current = recognition;
+    setIsListening(true);
+    recognition.start();
+  }
+
+  function handleToggleSpeak(id: string, text: string) {
+    setSpeechError(null);
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+      setSpeechError("このブラウザは音声読み上げに対応していません");
+      return;
+    }
+
+    if (speakingId === id) {
+      window.speechSynthesis.cancel();
+      setSpeakingId(null);
+      return;
+    }
+
+    window.speechSynthesis.cancel();
+    const cleanText = stripMarkdownForSpeech(text);
+    if (!cleanText) return;
+
+    const utterance = new SpeechSynthesisUtterance(cleanText);
+    utterance.lang = "ja-JP";
+    utterance.onend = () => setSpeakingId(null);
+    utterance.onerror = () => setSpeakingId(null);
+
+    setSpeakingId(id);
+    window.speechSynthesis.speak(utterance);
   }
 
   async function handleCountTokens() {
@@ -192,6 +311,13 @@ export default function Home() {
     if (isLoading) {
       abortControllerRef.current?.abort();
     }
+    if (isListening) {
+      stopVoiceInput();
+    }
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
+    setSpeakingId(null);
     setMessages([]);
     setTokenEstimate(null);
     setCountErrorState(null);
@@ -200,6 +326,10 @@ export default function Home() {
   async function askGemini(overridePrompt?: string) {
     const targetPrompt = (overridePrompt ?? prompt).trim();
     if (!targetPrompt || isLoading) return;
+
+    if (isListening) {
+      stopVoiceInput();
+    }
 
     const usedModel = selectedModel;
     const historySnapshot = messages.map((m) => ({
@@ -471,7 +601,7 @@ export default function Home() {
                 Gemini チャットへようこそ
               </h2>
               <p className="mt-1.5 text-sm text-slate-600">
-                モデル切り替え・Markdown/数式整形・ストリーミング・入出力トークン可視化に対応しています。
+                モデル切り替え・音声入出力・Markdown/数式整形・ストリーミング・トークン可視化に対応しています。
               </p>
               <div className="mt-4 flex flex-wrap justify-center gap-2">
                 {SAMPLE_QUESTIONS.map((sample) => (
@@ -512,7 +642,7 @@ export default function Home() {
                         : "border-slate-200 bg-white text-slate-900"
                     }`}
                   >
-                    <div className="mb-2 flex items-center justify-between border-b border-slate-100 pb-1.5">
+                    <div className="mb-2 flex items-center justify-between gap-2 border-b border-slate-100 pb-1.5">
                       <span className="text-xs font-semibold text-slate-500">
                         Gemini
                         {msg.model && (
@@ -527,13 +657,32 @@ export default function Home() {
                         )}
                       </span>
                       {msg.text && (
-                        <button
-                          type="button"
-                          onClick={() => handleCopyMessage(msg.id, msg.text)}
-                          className="rounded border border-slate-200 bg-slate-50 px-2 py-0.5 text-xs text-slate-600 hover:bg-slate-100 transition-colors"
-                        >
-                          {copiedId === msg.id ? "コピー済み" : "回答をコピー"}
-                        </button>
+                        <div className="flex items-center gap-1.5">
+                          {!isStreamingThis && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleToggleSpeak(msg.id, msg.text)
+                              }
+                              className={`rounded border px-2 py-0.5 text-xs transition-colors ${
+                                speakingId === msg.id
+                                  ? "border-amber-300 bg-amber-50 text-amber-800"
+                                  : "border-slate-200 bg-slate-50 text-slate-600 hover:bg-slate-100"
+                              }`}
+                            >
+                              {speakingId === msg.id
+                                ? "読み上げ停止"
+                                : "読み上げ"}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => handleCopyMessage(msg.id, msg.text)}
+                            className="rounded border border-slate-200 bg-slate-50 px-2 py-0.5 text-xs text-slate-600 hover:bg-slate-100 transition-colors"
+                          >
+                            {copiedId === msg.id ? "コピー済み" : "回答をコピー"}
+                          </button>
+                        </div>
                       )}
                     </div>
 
@@ -618,6 +767,15 @@ export default function Home() {
             }}
           />
 
+          {interimTranscript && (
+            <p className="rounded bg-amber-50 px-2.5 py-1 text-xs text-amber-800">
+              音声認識中: {interimTranscript}
+            </p>
+          )}
+          {speechError && (
+            <p className="text-xs text-red-600">{speechError}</p>
+          )}
+
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
               <span className="font-mono">{prompt.length} 文字</span>
@@ -640,6 +798,19 @@ export default function Home() {
             </div>
 
             <div className="flex items-center gap-2">
+              <button
+                type="button"
+                disabled={isLoading}
+                onClick={handleToggleVoiceInput}
+                className={`rounded-lg border px-3.5 py-2 text-sm font-medium transition-colors disabled:opacity-40 ${
+                  isListening
+                    ? "border-red-500 bg-red-50 text-red-700 animate-pulse"
+                    : "border-slate-300 bg-white text-slate-700 hover:bg-slate-100"
+                }`}
+              >
+                {isListening ? "マイク停止" : "音声入力"}
+              </button>
+
               {isLoading ? (
                 <button
                   type="button"
