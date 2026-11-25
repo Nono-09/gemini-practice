@@ -4,11 +4,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { MarkdownRenderer } from "@/components/MarkdownRenderer";
 import {
   buildSystemInstruction,
+  DEFAULT_MODEL_OPTIONS,
   GEMINI_MODEL,
   LENGTH_OPTIONS,
   PROMPT_TEMPLATES,
   SYSTEM_PRESETS,
   type ChatMessage,
+  type ModelOption,
   type OutputLength,
   type UsageSummary,
 } from "@/lib/gemini-config";
@@ -34,6 +36,10 @@ function createId(): string {
 export default function Home() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [prompt, setPrompt] = useState("");
+  const [modelOptions, setModelOptions] = useState<ModelOption[]>(
+    DEFAULT_MODEL_OPTIONS
+  );
+  const [selectedModel, setSelectedModel] = useState(GEMINI_MODEL);
   const [selectedPresetId, setSelectedPresetId] = useState(
     SYSTEM_PRESETS[0].id
   );
@@ -64,7 +70,7 @@ export default function Home() {
     [systemPrompt, outputLength]
   );
 
-  const estimateKey = `${messages.length}:${effectiveSystemInstruction ?? ""}:${prompt}`;
+  const estimateKey = `${selectedModel}:${messages.length}:${effectiveSystemInstruction ?? ""}:${prompt}`;
   const estimatedTokens =
     tokenEstimate?.key === estimateKey ? tokenEstimate.value : null;
   const countError =
@@ -83,6 +89,28 @@ export default function Home() {
       { prompt: 0, candidates: 0, total: 0 }
     );
   }, [messages]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadModels() {
+      try {
+        const res = await fetch("/api/gemini/models");
+        if (!res.ok) return;
+        const data = (await res.json()) as { models?: ModelOption[] };
+        if (!cancelled && data.models && data.models.length > 0) {
+          setModelOptions(data.models);
+        }
+      } catch {
+        // 取得失敗時はデフォルト一覧をそのまま使用
+      }
+    }
+
+    loadModels();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -121,6 +149,7 @@ export default function Home() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          model: selectedModel,
           messages: messages.map((m) => ({
             role: m.role,
             text: m.text,
@@ -172,6 +201,7 @@ export default function Home() {
     const targetPrompt = (overridePrompt ?? prompt).trim();
     if (!targetPrompt || isLoading) return;
 
+    const usedModel = selectedModel;
     const historySnapshot = messages.map((m) => ({
       role: m.role,
       text: m.text,
@@ -188,6 +218,7 @@ export default function Home() {
       id: modelMessageId,
       role: "model",
       text: "",
+      model: usedModel,
     };
 
     setMessages((prev) => [...prev, userMessage, initialModelMessage]);
@@ -211,6 +242,7 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         signal: controller.signal,
         body: JSON.stringify({
+          model: usedModel,
           messages: historySnapshot,
           prompt: targetPrompt,
           systemInstruction: effectiveSystemInstruction,
@@ -304,13 +336,23 @@ export default function Home() {
       {/* ヘッダー */}
       <header className="border-b border-slate-200 bg-white px-4 py-3 shadow-xs">
         <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2.5">
+          <div className="flex flex-wrap items-center gap-2.5">
             <h1 className="text-lg font-bold tracking-tight text-slate-900">
               gemini-practice
             </h1>
-            <span className="rounded-full bg-blue-50 px-2.5 py-0.5 font-mono text-xs font-medium text-blue-700 border border-blue-200">
-              {GEMINI_MODEL}
-            </span>
+            <select
+              aria-label="使用モデル"
+              value={selectedModel}
+              disabled={isLoading}
+              onChange={(e) => setSelectedModel(e.target.value)}
+              className="max-w-56 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1 font-mono text-xs font-medium text-blue-800 focus:border-blue-500 focus:outline-none disabled:opacity-50"
+            >
+              {modelOptions.map((opt) => (
+                <option key={opt.id} value={opt.id}>
+                  {opt.id}
+                </option>
+              ))}
+            </select>
           </div>
 
           <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -429,7 +471,7 @@ export default function Home() {
                 Gemini チャットへようこそ
               </h2>
               <p className="mt-1.5 text-sm text-slate-600">
-                Markdown・数式・コードの整形表示、ストリーミング出力、入出力トークン可視化、システムプロンプト切替に対応しています。
+                モデル切り替え・Markdown/数式整形・ストリーミング・入出力トークン可視化に対応しています。
               </p>
               <div className="mt-4 flex flex-wrap justify-center gap-2">
                 {SAMPLE_QUESTIONS.map((sample) => (
@@ -473,6 +515,11 @@ export default function Home() {
                     <div className="mb-2 flex items-center justify-between border-b border-slate-100 pb-1.5">
                       <span className="text-xs font-semibold text-slate-500">
                         Gemini
+                        {msg.model && (
+                          <span className="ml-2 rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[11px] font-normal text-slate-600">
+                            {msg.model}
+                          </span>
+                        )}
                         {isStreamingThis && (
                           <span className="ml-2 inline-block animate-pulse text-blue-600">
                             生成中...

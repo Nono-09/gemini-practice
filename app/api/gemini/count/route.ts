@@ -3,10 +3,11 @@ import { NextResponse } from "next/server";
 import {
   buildGeminiContents,
   extractGeminiErrorMessage,
-  GEMINI_MODEL,
+  resolveGeminiModel,
 } from "@/lib/gemini-config";
 
 interface CountPayload {
+  model?: string;
   prompt?: string;
   messages?: Array<{ role: "user" | "model"; text: string; isError?: boolean }>;
   systemInstruction?: string;
@@ -35,9 +36,10 @@ export async function POST(request: Request) {
       apiKey: process.env.GEMINI_API_KEY,
     });
 
+    const targetModel = resolveGeminiModel(body.model);
     const systemInstruction = body.systemInstruction?.trim() || undefined;
     const result = await ai.models.countTokens({
-      model: GEMINI_MODEL,
+      model: targetModel,
       contents,
       config: {
         ...(systemInstruction ? { systemInstruction } : {}),

@@ -1,5 +1,24 @@
 export const GEMINI_MODEL = "gemini-3.6-flash";
 
+export interface ModelOption {
+  id: string;
+  displayName: string;
+}
+
+export const DEFAULT_MODEL_OPTIONS: ModelOption[] = [
+  { id: "gemini-3.6-flash", displayName: "Gemini 3.6 Flash" },
+  { id: "gemini-3.8-flash", displayName: "Gemini 3.8 Flash" },
+  { id: "gemini-3.5-flash-lite", displayName: "Gemini 3.5 Flash-Lite" },
+];
+
+export function resolveGeminiModel(requestedModel?: string): string {
+  const cleaned = requestedModel?.trim().replace(/^models\//, "");
+  if (cleaned && /^[a-zA-Z0-9._-]+$/.test(cleaned)) {
+    return cleaned;
+  }
+  return GEMINI_MODEL;
+}
+
 export type OutputLength = "short" | "normal" | "detailed";
 
 export interface SystemPreset {
@@ -25,6 +44,7 @@ export interface ChatMessage {
   id: string;
   role: "user" | "model";
   text: string;
+  model?: string;
   usage?: UsageSummary;
   elapsedMs?: number;
   isError?: boolean;
