@@ -1,57 +1,69 @@
-import { GoogleGenAI } from '@google/genai';
-import { NextResponse } from 'next/server';
+import { GoogleGenAI } from "@google/genai";
+import { NextResponse } from "next/server";
+import {
+  buildGeminiContents,
+  extractGeminiErrorMessage,
+  GEMINI_MODEL,
+} from "@/lib/gemini-config";
+
+interface RequestPayload {
+  prompt?: string;
+  messages?: Array<{ role: "user" | "model"; text: string; isError?: boolean }>;
+  systemInstruction?: string;
+}
 
 export async function POST(request: Request) {
-    // APIキーが読み込めていないときは、Geminiに問い合わせる前に知らせる
-    if (!process.env.GEMINI_API_KEY) {
-        return NextResponse.json(
-            { error: 'GEMINI_API_KEYが設定されていません。.env.localを確認し、npm run devを再起動してください' },
-            { status: 500 }
-        );
+  if (!process.env.GEMINI_API_KEY) {
+    return NextResponse.json(
+      {
+        error:
+          "GEMINI_API_KEYが設定されていません。.env.localを確認し、npm run devを再起動してください",
+      },
+      { status: 500 }
+    );
+  }
+
+  try {
+    const body = (await request.json()) as RequestPayload;
+    const contents = buildGeminiContents(body.messages ?? [], body.prompt);
+
+    if (contents.length === 0) {
+      return NextResponse.json(
+        { error: "質問を入力してください" },
+        { status: 400 }
+      );
     }
 
-    try {
-        const { prompt } = await request.json();
+    const ai = new GoogleGenAI({
+      apiKey: process.env.GEMINI_API_KEY,
+    });
 
-        const ai = new GoogleGenAI({
-            apiKey: process.env.GEMINI_API_KEY,
-        });
+    const systemInstruction = body.systemInstruction?.trim() || undefined;
+    const startedAt = Date.now();
 
-        // モデル一覧
-        // https://aistudio.google.com/docs/models
-        const startedAt = Date.now();
-        const response = await ai.models.generateContent({
-            model: 'gemini-3.6-flash',
-            contents: prompt,
-        });
+    const response = await ai.models.generateContent({
+      model: GEMINI_MODEL,
+      contents,
+      config: {
+        ...(systemInstruction ? { systemInstruction } : {}),
+      },
+    });
 
-        return NextResponse.json({
-            answer: response.text,
-            usage: {
-                promptTokenCount: response.usageMetadata?.promptTokenCount ?? 0,
-                candidatesTokenCount: response.usageMetadata?.candidatesTokenCount ?? 0,
-                thoughtsTokenCount: response.usageMetadata?.thoughtsTokenCount ?? 0,
-                totalTokenCount: response.usageMetadata?.totalTokenCount ?? 0,
-            },
-            elapsedMs: Date.now() - startedAt,
-        });
-
-        return NextResponse.json({
-            answer: response.text,
-        });
-    } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        let detail = message;
-        try {
-            // Geminiのサーバーから返ったエラーはJSON形式なので、codeとmessageを取り出す
-            const data = JSON.parse(message).error;
-            detail = `code(${data?.code}) message(${data?.message})`;
-        } catch {
-            // JSONでないエラー（通信エラーなど）は、そのまま表示する
-        }
-        return NextResponse.json(
-            { error: `Gemini APIの呼び出しに失敗しました ${detail.substring(0, 160)}...` },
-            { status: 500 }
-        );
-    }
+    return NextResponse.json({
+      answer: response.text,
+      usage: {
+        promptTokenCount: response.usageMetadata?.promptTokenCount ?? 0,
+        candidatesTokenCount:
+          response.usageMetadata?.candidatesTokenCount ?? 0,
+        thoughtsTokenCount: response.usageMetadata?.thoughtsTokenCount ?? 0,
+        totalTokenCount: response.usageMetadata?.totalTokenCount ?? 0,
+      },
+      elapsedMs: Date.now() - startedAt,
+    });
+  } catch (error) {
+    return NextResponse.json(
+      { error: extractGeminiErrorMessage(error) },
+      { status: 500 }
+    );
+  }
 }
