@@ -1,45 +1,124 @@
-import { GoogleGenAI } from '@google/genai';
-import { NextResponse } from 'next/server';
+import { GoogleGenAI } from "@google/genai";
+import { NextResponse } from "next/server";
+import {
+  buildGeminiContents,
+  extractGeminiErrorMessage,
+  GEMINI_MODEL,
+  type UsageSummary,
+} from "@/lib/gemini-config";
+
+interface RequestPayload {
+  prompt?: string;
+  messages?: Array<{ role: "user" | "model"; text: string; isError?: boolean }>;
+  systemInstruction?: string;
+}
+
+function encodeNdjsonLine(payload: unknown): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify(payload) + "\n");
+}
 
 export async function POST(request: Request) {
-    // APIキーが読み込めていないときは、Geminiに問い合わせる前に知らせる
-    if (!process.env.GEMINI_API_KEY) {
-        return NextResponse.json(
-            { error: 'GEMINI_API_KEYが設定されていません。.env.localを確認し、npm run devを再起動してください' },
-            { status: 500 }
-        );
+  if (!process.env.GEMINI_API_KEY) {
+    return NextResponse.json(
+      {
+        error:
+          "GEMINI_API_KEYが設定されていません。.env.localを確認し、npm run devを再起動してください",
+      },
+      { status: 500 }
+    );
+  }
+
+  try {
+    const body = (await request.json()) as RequestPayload;
+    const contents = buildGeminiContents(body.messages ?? [], body.prompt);
+
+    if (contents.length === 0) {
+      return NextResponse.json(
+        { error: "質問を入力してください" },
+        { status: 400 }
+      );
     }
 
-    try {
-        const { prompt } = await request.json();
+    const ai = new GoogleGenAI({
+      apiKey: process.env.GEMINI_API_KEY,
+    });
 
-        const ai = new GoogleGenAI({
-            apiKey: process.env.GEMINI_API_KEY,
-        });
+    const systemInstruction = body.systemInstruction?.trim() || undefined;
+    const startedAt = Date.now();
 
-        // モデル一覧
-        // https://aistudio.google.com/docs/models
-        const response = await ai.models.generateContent({
-            model: 'gemini-3.6-flash',
-            contents: prompt,
-        });
+    const responseStream = await ai.models.generateContentStream({
+      model: GEMINI_MODEL,
+      contents,
+      config: {
+        abortSignal: request.signal,
+        ...(systemInstruction ? { systemInstruction } : {}),
+      },
+    });
 
-        return NextResponse.json({
-            answer: response.text,
-        });
-    } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        let detail = message;
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        let latestUsage: UsageSummary = {
+          promptTokenCount: 0,
+          candidatesTokenCount: 0,
+          thoughtsTokenCount: 0,
+          totalTokenCount: 0,
+        };
+
         try {
-            // Geminiのサーバーから返ったエラーはJSON形式なので、codeとmessageを取り出す
-            const data = JSON.parse(message).error;
-            detail = `code(${data?.code}) message(${data?.message})`;
-        } catch {
-            // JSONでないエラー（通信エラーなど）は、そのまま表示する
+          for await (const chunk of responseStream) {
+            if (request.signal.aborted) break;
+
+            if (chunk.usageMetadata) {
+              latestUsage = {
+                promptTokenCount: chunk.usageMetadata.promptTokenCount ?? 0,
+                candidatesTokenCount:
+                  chunk.usageMetadata.candidatesTokenCount ?? 0,
+                thoughtsTokenCount: chunk.usageMetadata.thoughtsTokenCount ?? 0,
+                totalTokenCount: chunk.usageMetadata.totalTokenCount ?? 0,
+              };
+            }
+
+            if (chunk.text) {
+              controller.enqueue(
+                encodeNdjsonLine({ type: "delta", text: chunk.text })
+              );
+            }
+          }
+
+          controller.enqueue(
+            encodeNdjsonLine({
+              type: "done",
+              usage: latestUsage,
+              elapsedMs: Date.now() - startedAt,
+            })
+          );
+          controller.close();
+        } catch (error) {
+          if (request.signal.aborted) {
+            controller.close();
+            return;
+          }
+          controller.enqueue(
+            encodeNdjsonLine({
+              type: "error",
+              error: extractGeminiErrorMessage(error),
+            })
+          );
+          controller.close();
         }
-        return NextResponse.json(
-            { error: `Gemini APIの呼び出しに失敗しました ${detail.substring(0, 160)}...` },
-            { status: 500 }
-        );
-    }
+      },
+    });
+
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "application/x-ndjson; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+      },
+    });
+  } catch (error) {
+    return NextResponse.json(
+      { error: extractGeminiErrorMessage(error) },
+      { status: 500 }
+    );
+  }
 }
